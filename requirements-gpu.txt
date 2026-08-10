@@ -1,0 +1,6 @@
+# Optional: only needed when WHISPER_DEVICE=cuda in .env. Large (~1.3GB) and NVIDIA-GPU-specific,
+# so kept out of requirements.txt. Install with:
+#   pip install -r requirements-gpu.txt
+-r requirements.txt
+nvidia-cublas-cu12
+nvidia-cudnn-cu12

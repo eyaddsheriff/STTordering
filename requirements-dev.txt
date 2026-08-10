@@ -2,3 +2,5 @@
 sounddevice
 soundfile
 requests
+pytest
+pytest-asyncio

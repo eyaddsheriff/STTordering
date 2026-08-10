@@ -6,7 +6,24 @@ class ChatMessage(BaseModel):
     content: str
 
 
+class OrderItem(BaseModel):
+    name: str
+    quantity: int
+    notes: str
+    item_id: str | None
+    price: float | None
+
+
+class InvalidOrderItem(BaseModel):
+    name: str
+    reason: str
+
+
 class VoiceOrderResponse(BaseModel):
     transcript: str
     reply_text: str
     conversation: list[ChatMessage]
+    intent: str
+    order_items: list[OrderItem]
+    invalid_items: list[InvalidOrderItem]
+    order_confirmed: bool

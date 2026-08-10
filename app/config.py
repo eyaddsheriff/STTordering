@@ -28,10 +28,15 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434/v1"
     ollama_model: str = "llama3.1"
 
-    # faster-whisper (local STT)
+    # faster-whisper (local STT). stt_language="ar" covers MSA + all dialects (no per-dialect code
+    # exists in Whisper); leave empty for auto-detect.
     whisper_model_size: str = "small"
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
+    stt_language: str = "ar"
+
+    # Local search-layer database (Phase 2 "Sync for Search" replica — see CLAUDE_1.md)
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/sttordering"
 
 
 settings = Settings()

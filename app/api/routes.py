@@ -5,8 +5,8 @@ from pathlib import Path
 from fastapi import APIRouter, Form, UploadFile
 from fastapi.responses import Response
 
+from app.agent import order_agent
 from app.models.schemas import ChatMessage, VoiceOrderResponse
-from app.services.llm import order_assistant
 from app.services.stt import speech_to_text
 from app.services.tts import text_to_speech
 
@@ -22,12 +22,20 @@ async def voice_order(audio: UploadFile, conversation: str = Form("[]")) -> Voic
         tmp_path = tmp.name
 
     transcript = speech_to_text.transcribe(tmp_path)
-
     history.append(ChatMessage(role="user", content=transcript))
-    reply_text = order_assistant.reply([m.model_dump() for m in history])
-    history.append(ChatMessage(role="assistant", content=reply_text))
 
-    return VoiceOrderResponse(transcript=transcript, reply_text=reply_text, conversation=history)
+    result = await order_agent.ainvoke({"conversation": [m.model_dump() for m in history]})
+    history.append(ChatMessage(role="assistant", content=result["reply_text"]))
+
+    return VoiceOrderResponse(
+        transcript=transcript,
+        reply_text=result["reply_text"],
+        conversation=history,
+        intent=result["intent"],
+        order_items=result.get("order_items", []),
+        invalid_items=result.get("invalid_items", []),
+        order_confirmed=result.get("order_confirmed", False),
+    )
 
 
 @router.post("/speak")
