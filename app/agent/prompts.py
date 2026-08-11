@@ -57,8 +57,14 @@ _LANGUAGE_MIRROR_INSTRUCTION = (
     "letters at all, even for terms like item names mentioned here in English."
 )
 
+# "and nothing else" is load-bearing: the model was otherwise pulling items it had merely *offered*
+# earlier in the conversation into the confirmation (e.g. confirming "koshari and mint tea" after
+# suggesting tea the customer never accepted). The structured order stayed correct, but on a voice
+# call the spoken sentence is all the customer hears, so it has to match the real order exactly.
 CONFIRM_REPLY_TEMPLATE = (
-    "Please confirm your order back to the customer in one short spoken sentence: {items}. "
+    "Confirm the customer's order back to them in one short spoken sentence. The order is exactly "
+    "this and nothing else: {items}. Do not mention, add, or imply any other item - not even "
+    "something you offered earlier in this conversation that they never accepted. "
     + _LANGUAGE_MIRROR_INSTRUCTION
 )
 

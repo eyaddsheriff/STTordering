@@ -12,4 +12,4 @@ asyncpg
 edge-tts
 pgvector
 redis
-sentence-transformers
+httpx

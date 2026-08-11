@@ -9,8 +9,13 @@ Stack: FastAPI + LangGraph (multi-agent orchestration) + DeepSeek V3 (primary LL
 + PostgreSQL/pgvector (BGE-M3 embeddings) + Redis + Faster Whisper (STT) + OpenAI TTS/Piper (TTS) +
 WebSocket/Socket.IO voice gateway.
 **Status: Proposal/spec locked. POC in progress. Phase 1 functionally working end-to-end (text + voice,
-English + Egyptian Arabic) against local stand-in providers. Phase 2 structured DB lookup working
-against sample data. Phases 3-5 not started.**
+English + Egyptian Arabic) against local stand-in providers, with Redis session memory. Phase 2
+semantic search working (pgvector + BGE-M3) against sample data; Restaurant Engine link and Sync
+Service still open. Phases 3-5 not started.**
+
+**The menu data is still the AI-generated sample set** (15 items, 2 fictional restaurants) from
+`database/04-seed.sql`. Every price and item the agent quotes today is invented. Replacing it with a
+real menu export is the top unblocked task - see "What's needed from the restaurant side" below.
 
 ---
 
@@ -18,8 +23,8 @@ against sample data. Phases 3-5 not started.**
 
 ```
 Phase 0  ✅ CONFIRMED     Spec locked. Architecture, design decisions, and tech stack finalized in proposal doc.
-Phase 1  🔄 IN PROGRESS   Core AI Engine: LangGraph + LLM agent, intent classification, order context mgmt. Functionally working (see checklist) - remaining gap is Redis-backed session memory (currently re-derived from conversation history each turn) and the real DeepSeek V3 API (currently Ollama local stand-in).
-Phase 2  🔄 IN PROGRESS   Data & Search Layer: structured DB lookup done against sample data; Restaurant Engine link, Sync Service, pgvector semantic search still pending.
+Phase 1  🔄 IN PROGRESS   Core AI Engine: LangGraph + LLM agent, intent classification, order context mgmt, Redis session memory. Functionally working (see checklist) - remaining gap is the real DeepSeek V3 API (currently Ollama local stand-in).
+Phase 2  🔄 IN PROGRESS   Data & Search Layer: pgvector + BGE-M3 semantic search working against sample data; Restaurant Engine link and Sync Service still pending, and the menu data itself is still the sample seed, not a real menu.
 Phase 3  ⬜ NOT STARTED   Voice Ordering Pipeline: WebSocket Voice Gateway, STT/TTS streaming, Chat → Voice Assistant. (A synchronous REST voice pipeline exists as a POC/test harness - see note below.)
 Phase 4  ⬜ NOT STARTED   Order Management & Integration: Live Confirmation, Order Service ↔ Restaurant Engine API, order/customer history.
 Phase 5  ⬜ NOT STARTED   Optimization & Testing: intent accuracy, search quality, response latency, load testing, MVP hardening.
@@ -133,9 +138,10 @@ WebSockets, and databases.
 conditional routing).
 **Current state:** built (`app/agent/graph.py`). Graph: `classify_and_extract` (merged intent
 classification + item extraction into one LLM call - see latency note below) → `validate_order_items` →
-conditionally `generate_reply` or `confirm_order`. No persistent cross-call memory yet (Redis, section
-4.8) — order state is currently re-derived from the full conversation history on every turn, since the
-REST API is stateless per-request.
+conditionally `generate_reply` or `confirm_order`. Conversation and order state persist in Redis
+across turns of the same call (section 4.8). The agent itself is still stateless per-invocation — it
+re-derives the order from the conversation each turn rather than mutating stored state — and there's
+no memory *across* calls (that's the PostgreSQL half of 4.8, not built).
 
 ### 4.4 LLM Layer
 - **Primary:** DeepSeek V3 API — the system's main "brain" (low cost, strong performance, supports tool
@@ -162,7 +168,9 @@ REST API is stateless per-request.
 text).
 **Why:** combines structured data (prices, categories) with semantic data (food descriptions and order
 meaning).
-**Current state:** see Phase 2 checklist below — structured lookup only, no pgvector/embeddings yet.
+**Current state:** built and tested against the sample menu — BGE-M3 embeddings in `menu_embeddings`,
+HNSW-indexed, queried by cosine distance, with lexical matching retained as a cross-check. See the
+two-threshold section under Phase 2 before changing any of it.
 
 ### 4.7 Sync Service
 Keeps the local search replica up to date via Webhook (on price/product changes) or Polling as a
@@ -172,10 +180,11 @@ fallback.
 ### 4.8 Order Management & Memory System
 - **Redis:** temporary order state and session memory (current call, current order).
 - **PostgreSQL:** order history and customer memory/preferences (e.g., "Ahmed likes spicy food").
-**Current state:** not built. `sessions`/`orders`/`order_items`/`conversation_history`/
-`customer_preferences` tables exist in the DB schema (seeded with sample data) but nothing in the app
-reads/writes them yet — only `menu_items`/`categories`/`restaurants` are actually queried
-(`app/repositories/menu_repository.py`).
+**Current state:** Redis half is built (`app/services/session_store.py` — conversation + order state
+per `session_id`, 30-min TTL). The PostgreSQL half is not: `sessions`/`orders`/`order_items`/
+`conversation_history`/`customer_preferences` tables exist and are seeded, but nothing in the app
+reads or writes them — only `menu_items`/`categories`/`restaurants` are queried. So nothing survives
+a Redis expiry or restart, and there's no cross-call customer memory yet.
 
 ---
 
@@ -213,9 +222,9 @@ Customer ◄── Confirm ◄── Save History ◄── Create Order ◄─�
 | Communication    | WebSocket / Socket.IO    | Real-time voice streaming                | ⬜ REST POC only |
 | LLM              | DeepSeek V3              | Cost + performance balance               | Ollama (`qwen2.5:7b`), local, free |
 | Orchestration    | LangGraph                | Agent workflow management                | ✅ as planned |
-| Search DB        | PostgreSQL + pgvector    | Hybrid structured/vector search          | pgvector installed + schema applied, no embeddings populated yet |
-| Embedding        | BGE-M3                   | Arabic + English semantic search         | ⬜ not built (difflib fuzzy match instead) |
-| Cache            | Redis                    | Fast session state                       | ⬜ not built |
+| Search DB        | PostgreSQL + pgvector    | Hybrid structured/vector search          | ✅ as planned (sample menu data) |
+| Embedding        | BGE-M3                   | Arabic + English semantic search         | ✅ as planned (served via Ollama) |
+| Cache            | Redis                    | Fast session state                       | ✅ session memory; order history still PostgreSQL-only |
 | Memory           | PostgreSQL               | Customer history                         | ⬜ schema exists, unused |
 | Sync             | Webhook / Polling        | Data synchronization                     | ⬜ not built |
 | STT              | Faster Whisper           | Speech recognition                       | ✅ as planned (medium, GPU) |
@@ -230,9 +239,16 @@ Customer ◄── Confirm ◄── Save History ◄── Create Order ◄─�
 [x] LLM Agent built with LangGraph + DeepSeek (Ollama stand-in - see 4.4)
 [x] Conversation understanding tested end-to-end (text + real mic/speaker voice, English + Egyptian Arabic)
 [x] Intent classification implemented (ORDER / MODIFY_ORDER / QUESTION / CONFIRM / CHITCHAT)
-[x] Order context management across turns (re-derived from conversation history each turn - no
-    persistent session store yet, see 4.3/4.8 gap)
+[x] Order context management across turns (Redis-backed session store, see below)
 ```
+
+**Session memory (Redis).** `POST /api/voice-order` takes a `session_id` (minted server-side on the
+first turn and echoed back) instead of requiring the client to resend the whole transcript every
+turn. Conversation history and last-known order state live in Redis under that id with a 30-minute
+TTL (`SESSION_TTL_SECONDS`), so idle calls expire instead of accumulating forever. Run Redis with:
+`docker run -d --name sttordering-redis -p 6379:6379 --restart unless-stopped redis:7-alpine`.
+Verified end-to-end: a second turn sending only the session id still remembers and confirms the
+order from the first.
 
 **Known issues found & fixed (worth knowing before touching `app/agent/nodes.py` again):**
 - The local LLM (qwen2.5:7b via Ollama) would non-deterministically drop items from structured
@@ -266,6 +282,12 @@ Customer ◄── Confirm ◄── Save History ◄── Create Order ◄─�
   "كسري وسط" -> "كشري وسط"). Added a regression test (`test_unrelated_arabic_phrase_does_not_false_match`)
   since the existing test suite didn't catch this - it tested "سوشي" which happened to score exactly
   0.400, right at the old boundary, while "آيس كريم فراولة" at 0.435 slipped through undetected.
+- The spoken confirmation named items the customer never ordered - after the agent *offered* mint
+  tea and the customer ignored it, confirming produced "koshari and mint tea". `order_items` stayed
+  correct, so this was invisible to the API and to the tests, but on a voice call the spoken
+  sentence is the entire customer experience. Fixed by making `CONFIRM_REPLY_TEMPLATE` state that
+  the item list is exhaustive and that previously-offered-but-unaccepted items must not appear
+  (0/6 leaks after, reproduced before the fix).
 - **Takeaway for future LLM-structured-output work:** always pin `temperature=0` + use JSON mode for
   anything meant to be parsed programmatically; never trust that a "name" field alone captures
   everything needed to identify a specific SKU without also checking adjacent free-text fields; never
@@ -302,16 +324,54 @@ stayed near-idle during generation). Two fixes applied:
     Orders are now validated against real (sample) menu data - no hallucinated items/prices.
 [x] Tests added (tests/) covering menu_repository.py: exact match, fuzzy match, not-found, unavailable.
 [x] pgvector extension installed (locally, Windows binary - see note below) and real schema applied
-[ ] BGE-M3 embeddings generated/loaded into menu_embeddings
-[ ] Semantic search within the menu implemented and tested
+[x] BGE-M3 embeddings generated/loaded into menu_embeddings (scripts/generate_embeddings.py)
+[x] Semantic search within the menu implemented and tested (tests/test_semantic_search.py)
+[ ] Real menu data (still the AI-generated sample seed - see top of file)
 ```
 
-**Note — structured lookup vs. semantic search (do not conflate):** the checked items above are a
-plain-SQL structured lookup with `difflib`-based fuzzy string matching (ILIKE substring + closeness
-ranking), *not* the pgvector/BGE-M3 semantic search this phase ultimately calls for. It cannot bridge
-things true embeddings would (e.g. transliterated "Kishari" vs Arabic "كشري", or "something spicy"
-style intent queries) — see the placeholder comment at the top of `app/repositories/menu_repository.py`
-for exactly what to rip out when embeddings land.
+### Semantic search: why there are two thresholds, not one
+
+The single most important thing to understand before touching `menu_repository.py`.
+
+**A single distance cutoff cannot work.** Measured against the seeded menu (cosine distance,
+0 = identical):
+
+| query | nearest item | distance | on the menu? |
+|---|---|---|---|
+| `كشري كبير` | كشري كبير | 0.366 | yes |
+| `كسري وسط` (typo) | كشري وسط | 0.375 | yes |
+| **`سمك مشوي`** (grilled fish) | كباب مشوي | **0.489** | **NO** |
+| `koshary large` | كشري كبير | 0.483 | yes |
+| `koshari` | كشري سوبريم | 0.616 | yes |
+
+An off-menu item (0.489) sits *closer* than a real match (0.616), so any single threshold either
+rejects genuine orders or accepts off-menu ones. This isn't a tuning failure - embeddings measure
+**relatedness**, and grilled fish genuinely is related to grilled kebab. Ordering needs **identity**,
+which is a different question.
+
+So identity and suggestion are split:
+- `get_item_by_name` = **identity** (the order-validation gate). Strict: `_SEMANTIC_IDENTITY_DISTANCE`
+  = 0.40. A false positive here charges the customer for a dish they never asked for.
+- `search_items` = **suggestions** (what the agent offers/mentions). Wide: `_SEMANTIC_SUGGEST_DISTANCE`
+  = 0.65. Nothing here is ever silently added to an order, so a loose match is harmless - it just
+  lets the agent say "we don't have X, but we have Y" instead of a bare "no".
+
+**Lexical and semantic must agree.** Writing the semantic tests exposed a *pre-existing* bug in the
+difflib path: `سمك مشوي` (not on the menu) scores **0.7059** against `كباب مشوي` - well past the 0.6
+bar - purely because both end in `مشوي`, so a customer asking for grilled fish would have been sold
+grilled kebab at 150 EGP. Raising the difflib threshold was not viable: it would have to fit between
+0.7059 and a real typo at 0.8750. Instead `get_item_by_name` now requires both signals to agree
+before accepting a character-overlap match, since they fail in different ways - embeddings correctly
+place that query at 0.489, outside the identity band, and veto it. The old test suite missed this
+because it never tested a query sharing a word with a real item.
+
+**This is the second bug of exactly this shape** (after the 0.4-threshold ice-cream false positive).
+The pattern to remember: *any* matching threshold must be tested against inputs that are related to
+menu items but are not them - not just plausible typos and obviously-unrelated words.
+
+**Fallback.** With `menu_embeddings` empty, `_semantic_search` returns None and everything degrades
+to the pre-pgvector difflib behaviour (including the `سمك مشوي` false positive - it needs embeddings
+to catch). A fresh checkout works without running `generate_embeddings.py`, just less safely.
 
 **Schema source (resolved):** a coworker pushed `origin/feature/database-backend`, which includes the
 real, authoritative `database/01-extensions.sql` through `04-seed.sql` (properly designed: CHECK
@@ -333,6 +393,18 @@ That branch also includes:
   into that service (which would be the more "correct" match to the original proposal's separate
   Search/Order Service split, but is a real re-architecture, not a drop-in). Revisit this decision once
   ready to build the real Restaurant Engine / Order Service integration (Phase 4).
+
+**Embeddings run through Ollama, not sentence-transformers.** `ollama pull bge-m3` (1024-dim, same
+model the schema names). The first implementation loaded `sentence-transformers` in-process, which
+held ~2.2GB resident and starved Ollama of the memory it needed for its own runner - the LLM died
+mid-request with `GGML_ASSERT(ctx->mem_buffer != NULL) failed`, an out-of-memory failure, on a 16GB
+machine also running Whisper, Docker and VS Code. Moving the model into Ollama (which already owns
+model lifecycle - loads on demand, shares the GPU, unloads when idle) removed the contention instead
+of shifting it, dropped `torch` from the API process entirely, and as a side effect raised
+qwen2.5:7b's GPU offload from 77% to **93%**. Verified the quantized Ollama vectors match the
+sentence-transformers ones to within 0.001 cosine distance, so the tuned thresholds carry over.
+Measured agent turn afterwards: ~5.6-6.5s steady state (excludes STT/TTS; first call pays a one-off
+model load, which `app/main.py` warms at startup).
 
 **pgvector install note:** not available via `CREATE EXTENSION` by default on a stock Windows Postgres
 16 install - required manually placing a precompiled binary (`andreiramani/pgvector_pgsql_windows`,
@@ -364,6 +436,43 @@ PowerShell). If setting this up on a fresh machine again, expect the same manual
 [ ] Load/stress testing
 [ ] MVP-ready build prepared
 ```
+
+---
+
+## What's needed from the restaurant side (blocks real progress)
+
+Everything below is blocked on access/decisions, not on engineering effort.
+
+**1. Restaurant Engine API access** — blocks the Sync Service (Phase 2) and *all* of Phase 4. Ask
+the dev team for: base URL (staging **and** production), a working bearer token for staging, API
+docs/OpenAPI spec, the four endpoints that matter (fetch menu, check price+availability, create
+order, order status) with sample payloads, whether **webhooks** on menu/price change are supported
+(decides webhook vs. polling, and the polling interval + rate limits if not), whether order creation
+accepts an **idempotency key** (prevents duplicate orders when a call drops mid-confirm), and a test
+restaurant account on staging so testing never creates real orders.
+
+**2. A real menu export** (CSV/JSON/Excel from the admin panel) — unblocks meaningful testing today,
+without waiting on the API. Needs stable item IDs (to place real orders later), an availability
+flag, and descriptions/ingredients — the embeddings index that text, so intent queries like
+"something spicy" only work if it exists. A manual export is a snapshot; it won't track price
+changes, which is what the Sync Service eventually solves.
+
+**3. A DeepSeek API key** — fixes latency and dialect quality at once, and is already wired
+(`LLM_PROVIDER=deepseek`). qwen2.5:7b only fits this 8GB GPU at ~93% offload; DeepSeek removes the
+VRAM constraint entirely.
+
+**4. Two decisions.** (a) *Production TTS*: Edge TTS is free but an unofficial API - Azure Speech is
+the same voices officially licensed, OpenAI TTS and ElevenLabs are alternatives, Piper is the
+offline fallback. Genuinely colloquial Egyptian needs voice cloning, which requires a recorded
+sample **plus rights to use that person's voice**. (b) *Where this deploys*: Whisper wants a GPU;
+that also decides whether local STT is viable at all.
+
+**5. Business rules the agent will hit on day one** (not in the proposal): delivery vs. pickup, fees
+and zones, minimum order value, payment method, what to say when the restaurant is closed, whether
+there's a human to hand off to, and whether a phone number is required to place an order.
+
+**6. For Phase 5 evaluation**: 20-30 real customer phrasings, ideally call transcripts. Current test
+phrases are invented, which risks tuning for imagined customers rather than actual ones.
 
 ---
 

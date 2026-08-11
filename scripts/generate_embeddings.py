@@ -37,7 +37,7 @@ async def main() -> None:
         print("No menu items found - nothing to embed.")
         return
 
-    print(f"Embedding {len(items)} menu items with {MODEL_NAME} (first run downloads ~2.2GB)...")
+    print(f"Embedding {len(items)} menu items with {MODEL_NAME} via Ollama...")
     vectors = embed_batch([_embedding_text(item) for item in items])
 
     async with new_session() as session:

@@ -25,13 +25,22 @@ from app.db.session import new_session
 # misspellings (min observed ~0.80, e.g. "كسري وسط" -> "كشري وسط").
 _FUZZY_MATCH_THRESHOLD = 0.6
 
-# Cosine distance cutoff for the semantic path (0 = identical, 2 = opposite). Serves the same safety
-# purpose as _FUZZY_MATCH_THRESHOLD: an off-menu request ("strawberry ice cream") must return no
-# match rather than the nearest food-ish item, so the agent tells the customer it isn't available
-# instead of silently substituting something. Tuned against the seeded menu - see
-# tests/test_semantic_search.py, which pins both the "real paraphrase matches" and the
-# "off-menu item does NOT match" sides of this boundary.
-_SEMANTIC_DISTANCE_THRESHOLD = 0.45
+# Two cutoffs, not one, because measurement showed a single global threshold CANNOT separate
+# "same dish" from "different but related dish" (cosine distance: 0 = identical, 2 = opposite).
+# Measured against the seeded menu:
+#     سمك مشوي  (grilled fish, NOT on the menu) -> 0.4897 from كباب مشوي
+#     koshari   (transliteration, IS on the menu) -> 0.6151 from كشري سوبريم
+# The off-menu item is *closer* than a real match, so any single threshold either rejects real
+# orders or accepts off-menu ones. That's inherent: embeddings measure relatedness, and grilled
+# fish genuinely is related to grilled kebab - it's just not the same dish, which is what ordering
+# actually needs to know.
+#
+# So: only a strong match may silently resolve to an item (identity), while the wider band is
+# treated as "did you mean...?" material the agent asks about (suggestions). Nothing in the wider
+# band is ever added to an order on its own.
+_SEMANTIC_IDENTITY_DISTANCE = 0.40  # auto-accept as "this is the item"; measured margin to the
+# nearest off-menu item (0.4897) is ~0.09
+_SEMANTIC_SUGGEST_DISTANCE = 0.65  # only offered as a suggestion for the agent to confirm
 
 
 @dataclass
@@ -53,7 +62,46 @@ def _to_row(item: MenuItem) -> MenuItemRow:
     )
 
 
-async def _semantic_search(query: str, limit: int) -> list[MenuItemRow] | None:
+async def _all_items() -> list[MenuItem]:
+    async with new_session() as session:
+        result = await session.execute(
+            select(MenuItem).where(MenuItem.is_deleted.is_(False)).order_by(MenuItem.name)
+        )
+        return list(result.scalars().all())
+
+
+def _closeness(query: str, item: MenuItem) -> float:
+    return difflib.SequenceMatcher(None, query.lower().strip(), item.name.lower()).ratio()
+
+
+def _substring_hits(all_items: list[MenuItem], query: str) -> list[MenuItemRow]:
+    """Items whose name literally contains the query. The strongest evidence available: the
+    customer said characters that actually appear in the item's name.
+    """
+    query_lower = query.lower().strip()
+    hits = [item for item in all_items if query_lower in item.name.lower()]
+    return [_to_row(item) for item in sorted(hits, key=lambda i: _closeness(query, i), reverse=True)]
+
+
+def _fuzzy_hits(all_items: list[MenuItem], query: str) -> list[MenuItemRow]:
+    """Items close enough by character overlap to be a plausible typo/mis-transcription.
+
+    Weak evidence on its own - see the caller in get_item_by_name for why this is not sufficient
+    to identify an item when embeddings are available.
+    """
+    ranked = sorted(all_items, key=lambda i: _closeness(query, i), reverse=True)
+    return [_to_row(i) for i in ranked if _closeness(query, i) > _FUZZY_MATCH_THRESHOLD]
+
+
+def _lexical_search(all_items: list[MenuItem], query: str, limit: int) -> list[MenuItemRow]:
+    """ILIKE-substring first, falling back to difflib closeness. Blind to transliteration and
+    synonyms - that's what the semantic path is for.
+    """
+    hits = _substring_hits(all_items, query) or _fuzzy_hits(all_items, query)
+    return hits[:limit]
+
+
+async def _semantic_search(query: str, limit: int, max_distance: float) -> list[MenuItemRow] | None:
     """pgvector cosine-similarity search. Returns None when embeddings aren't populated yet, so the
     caller can fall back to string matching rather than silently returning no results.
     """
@@ -66,13 +114,12 @@ async def _semantic_search(query: str, limit: int) -> list[MenuItemRow] | None:
         # reason to pay for it on a DB that hasn't had generate_embeddings.py run against it.
         from app.services.embeddings import embed
 
-        query_vector = embed(query)
-        distance = MenuEmbedding.embedding.cosine_distance(query_vector)
+        distance = MenuEmbedding.embedding.cosine_distance(embed(query))
         result = await session.execute(
             select(MenuItem, distance)
             .join(MenuEmbedding, MenuEmbedding.menu_item_id == MenuItem.id)
             .where(MenuItem.is_deleted.is_(False))
-            .where(distance < _SEMANTIC_DISTANCE_THRESHOLD)
+            .where(distance < max_distance)
             .order_by(distance)
             .limit(limit)
         )
@@ -80,40 +127,61 @@ async def _semantic_search(query: str, limit: int) -> list[MenuItemRow] | None:
 
 
 async def search_items(query: str, limit: int = 5) -> list[MenuItemRow]:
-    """Search available-or-not menu items by name. Empty query returns the full menu (up to limit)."""
-    async with new_session() as session:
-        result = await session.execute(
-            select(MenuItem).where(MenuItem.is_deleted.is_(False)).order_by(MenuItem.name)
-        )
-        all_items = result.scalars().all()
+    """Find candidate items to *offer* the customer - "did you mean...?" suggestions and browsing.
 
+    Deliberately wider than get_item_by_name: results here are things the agent mentions, never
+    things it silently adds to an order. Empty query returns the full menu (up to limit).
+    """
+    all_items = await _all_items()
     if not query:
         return [_to_row(item) for item in all_items[:limit]]
 
-    semantic_hits = await _semantic_search(query, limit)
-    if semantic_hits is not None:
-        return semantic_hits
+    results = _lexical_search(all_items, query, limit)
 
-    query_lower = query.lower().strip()
-    substring_hits = [item for item in all_items if query_lower in item.name.lower()]
-    candidates = substring_hits if substring_hits else all_items
+    # Semantic hits widen recall (transliteration, synonyms, "something sweet"), but go *after*
+    # lexical ones: if the customer's actual letters appear in an item name, that's the better bet.
+    semantic = await _semantic_search(query, limit, _SEMANTIC_SUGGEST_DISTANCE)
+    if semantic:
+        seen = {row.id for row in results}
+        results.extend(row for row in semantic if row.id not in seen)
 
-    def closeness(item: MenuItem) -> float:
-        return difflib.SequenceMatcher(None, query_lower, item.name.lower()).ratio()
-
-    ranked = sorted(candidates, key=closeness, reverse=True)
-
-    if not substring_hits:
-        # No item even contains the query as a substring - only keep genuinely close matches
-        # instead of returning the whole menu as "close enough".
-        ranked = [item for item in ranked if closeness(item) > _FUZZY_MATCH_THRESHOLD]
-
-    return [_to_row(item) for item in ranked[:limit]]
+    return results[:limit]
 
 
 async def get_item_by_name(name: str) -> MenuItemRow | None:
-    matches = await search_items(name, limit=1)
-    return matches[0] if matches else None
+    """Resolve a spoken item name to exactly one menu item, or None.
+
+    This is the order-validation gate, so it is intentionally stricter than search_items: it must
+    return None for anything not actually on the menu rather than the nearest lookalike, because a
+    false positive here means the customer is charged for a dish they never asked for.
+    """
+    all_items = await _all_items()
+
+    # 1. The query literally appears in the item name - accept.
+    substring = _substring_hits(all_items, name)
+    if substring:
+        return substring[0]
+
+    semantic = await _semantic_search(name, limit=1, max_distance=_SEMANTIC_IDENTITY_DISTANCE)
+    fuzzy = _fuzzy_hits(all_items, name)
+
+    # 2. No embeddings yet -> difflib alone, the pre-pgvector behaviour.
+    if semantic is None:
+        return fuzzy[0] if fuzzy else None
+
+    # 3. Both signals available, so require them to AGREE before treating a mere character-overlap
+    #    hit as identity. They fail in different ways, which is exactly why the combination is
+    #    safer than either alone: "سمك مشوي" (grilled fish, not on the menu) scores 0.7059 against
+    #    "كباب مشوي" on difflib - well past the 0.6 bar - purely because both end in "مشوي", and
+    #    would otherwise be silently sold as grilled kebab. Embeddings correctly place it at 0.4897,
+    #    outside the identity band, and veto the match. Raising the difflib threshold instead was
+    #    not viable: it would have to fit between 0.7059 and a real typo at 0.8750.
+    if fuzzy and semantic and fuzzy[0].id == semantic[0].id:
+        return fuzzy[0]
+
+    # 4. A confident semantic match with no lexical support is still trustworthy - it cleared the
+    #    strict identity distance, which off-menu items measurably do not.
+    return semantic[0] if semantic else None
 
 
 async def check_availability(item_id: uuid.UUID) -> bool:
