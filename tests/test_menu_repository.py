@@ -73,6 +73,17 @@ async def test_not_found_returns_none():
     assert item is None
 
 
+async def test_unrelated_arabic_phrase_does_not_false_match():
+    # Regression test: "آيس كريم فراولة" (strawberry ice cream, not on the menu at all) previously
+    # scored 0.435 similarity against "كشري وسط" under the old 0.4 threshold - purely from incidental
+    # shared Arabic letters, not real closeness - and was silently accepted as a match. A customer
+    # asking for this would have been told it was added to their order when it had actually been
+    # silently swapped for a medium koshari.
+    for unrelated in ("آيس كريم فراولة", "بيتزا", "سوشي", "تاكو", "برجر"):
+        item = await menu_repository.get_item_by_name(unrelated)
+        assert item is None, f"{unrelated!r} incorrectly matched {item}"
+
+
 async def test_search_items_suggests_close_alternatives_when_not_found():
     suggestions = await menu_repository.search_items("كشري", limit=3)
 

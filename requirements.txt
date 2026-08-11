@@ -9,3 +9,7 @@ piper-tts
 langgraph
 sqlalchemy[asyncio]
 asyncpg
+edge-tts
+pgvector
+redis
+sentence-transformers

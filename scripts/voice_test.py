@@ -7,7 +7,6 @@ Windows-only (uses msvcrt for keypress detection): Enter starts/stops recording,
 """
 
 import io
-import json
 
 import msvcrt
 import numpy as np
@@ -56,7 +55,7 @@ def play_audio(audio_bytes: bytes) -> None:
 
 
 def main() -> None:
-    conversation: list[dict] = []
+    session_id: str | None = None
     print("Voice ordering test client. Esc to quit.\n")
 
     while True:
@@ -72,11 +71,11 @@ def main() -> None:
         response = requests.post(
             f"{API_URL}/api/voice-order",
             files={"audio": ("order.wav", wav_buffer, "audio/wav")},
-            data={"conversation": json.dumps(conversation)},
+            data={"session_id": session_id} if session_id else {},
         )
         response.raise_for_status()
         result = response.json()
-        conversation = result["conversation"]
+        session_id = result["session_id"]
 
         print(f"You said:   {result['transcript']}")
         print(f"Intent:     {result['intent']}")

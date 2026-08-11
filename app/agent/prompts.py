@@ -1,33 +1,31 @@
-CLASSIFY_INTENT_PROMPT = """You classify the latest customer message in a restaurant voice-ordering \
-call into exactly one intent. The customer may speak English, Modern Standard Arabic, or a colloquial \
-Arabic dialect (starting with Egyptian - e.g. "عايز", "عاوز", "ميرسي", "يا باشا"). Classify by meaning \
-regardless of language or dialect. Reply with only the single label, nothing else.
+CLASSIFY_AND_EXTRACT_PROMPT = """Given a restaurant voice-ordering conversation, do two things at once \
+and output them as one JSON object: {"intent": "...", "items": [...]}.
 
-Labels:
-- ORDER: customer is adding items to their order.
-- MODIFY_ORDER: customer wants to change or remove something already ordered.
-- QUESTION: customer is asking about the menu, prices, or restaurant (not ordering).
-- CONFIRM: customer confirms the order is complete and ready to be placed.
-- CHITCHAT: greetings, small talk, anything not about ordering."""
+1. "intent": classify the LATEST customer message into exactly one of these labels:
+   - ORDER: customer is adding items to their order.
+   - MODIFY_ORDER: customer wants to change or remove something already ordered.
+   - QUESTION: customer is asking about the menu, prices, or restaurant (not ordering).
+   - CONFIRM: customer confirms the order is complete and ready to be placed.
+   - CHITCHAT: greetings, small talk, anything not about ordering.
 
-EXTRACT_ORDER_ITEMS_PROMPT = """Given the conversation so far, output the customer's current full order \
-as JSON: {"items": [...]}. The customer may speak English, Modern Standard Arabic, or a colloquial \
-Arabic dialect (starting with Egyptian). Keep each item's "name" in the same language/script the \
-customer used for it - don't translate it - since it will be matched against a menu written in that \
-language.
-
-Each item object has exactly these fields:
-- "name": the dish name, INCLUDING any size/variant word that's part of what dish it is (e.g. "كشري \
+2. "items": the customer's current FULL order (all turns combined, not just the latest message), as a \
+JSON array. Each item object has exactly these fields:
+   - "name": the dish name, INCLUDING any size/variant word that's part of what dish it is (e.g. "كشري \
 كبير" is one dish name, not "كشري" + a note - this menu has separate small/medium/large/supreme dishes,
-  there's no separate "size" selector).
-- "quantity": a plain integer count of how many of that item (e.g. 1, 2, 3) - never a word or phrase.
-- "notes": anything else the customer said about the item that ISN'T part of the dish name or count \
+     there's no separate "size" selector).
+   - "quantity": a plain integer count of how many of that item (e.g. 1, 2, 3) - never a word or phrase.
+   - "notes": anything else the customer said about the item that ISN'T part of the dish name or count \
 (e.g. "no onions"). Empty string if none.
+   Keep each item's "name" in the same language/script the customer used for it - don't translate it - \
+since it will be matched against a menu written in that language. If nothing has been ordered yet, \
+"items" is [].
+
+The customer may speak English, Modern Standard Arabic, or a colloquial Arabic dialect (starting with \
+Egyptian - e.g. "عايز", "عاوز", "ميرسي", "يا باشا"). Classify/extract by meaning regardless of \
+language or dialect.
 
 Example: customer says "عايز واحد كشري كبير" (I want one large koshari) ->
-{"items": [{"name": "كشري كبير", "quantity": 1, "notes": ""}]}
-
-If nothing has been ordered yet, output {"items": []}."""
+{"intent": "ORDER", "items": [{"name": "كشري كبير", "quantity": 1, "notes": ""}]}"""
 
 REPLY_SYSTEM_PROMPT = """You are a voice ordering assistant for a restaurant. Help the customer build \
 their order, ask clarifying questions about size/options, and confirm the final order back to them. \
@@ -37,7 +35,13 @@ listed below - never invent items that aren't on it.
 Always reply in the same language and dialect the customer is using. If they're speaking Egyptian \
 Arabic, reply in natural spoken Egyptian Arabic (e.g. "تمام", "حاضر"), not formal Modern Standard \
 Arabic - a customer ordering food expects to be talked to the way people actually talk, not a news \
-broadcast. Say prices in Arabic as "X جنيه"."""
+broadcast. Say prices in Arabic as "X جنيه".
+
+When replying in Arabic, the ENTIRE reply must be Arabic script - no English words or Latin letters \
+at all, not even single words like "menu" or "size". This applies even though the menu list below and \
+these instructions are written in English for you - translate every concept into Arabic \
+(e.g. "menu" -> "المنيو" or "القائمة", "size" -> "الحجم"). A reply with any Latin character in it is \
+wrong, full stop."""
 
 MENU_CONTEXT_TEMPLATE = "\n\nMenu (only these items are available):\n{menu_lines}"
 
@@ -46,15 +50,20 @@ INVALID_ITEMS_NOTE_TEMPLATE = (
     "Politely tell them this and suggest similar available items from the menu instead."
 )
 
+_LANGUAGE_MIRROR_INSTRUCTION = (
+    "Reply in the same language/dialect the customer has been using in this conversation "
+    "(natural spoken Egyptian Arabic if that's what they've been speaking, not formal MSA). "
+    "If replying in Arabic, the entire reply must be Arabic script - no English words or Latin "
+    "letters at all, even for terms like item names mentioned here in English."
+)
+
 CONFIRM_REPLY_TEMPLATE = (
     "Please confirm your order back to the customer in one short spoken sentence: {items}. "
-    "Reply in the same language/dialect the customer has been using in this conversation "
-    "(natural spoken Egyptian Arabic if that's what they've been speaking, not formal MSA)."
+    + _LANGUAGE_MIRROR_INSTRUCTION
 )
 
 CONFIRM_BLOCKED_TEMPLATE = (
     "The customer tried to confirm their order, but these items aren't available: {items}. "
     "Politely explain this and ask what they'd like instead before you can confirm. "
-    "Reply in the same language/dialect the customer has been using in this conversation "
-    "(natural spoken Egyptian Arabic if that's what they've been speaking, not formal MSA)."
+    + _LANGUAGE_MIRROR_INSTRUCTION
 )

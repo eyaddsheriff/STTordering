@@ -2,10 +2,9 @@ import json
 
 from app.agent.client import get_client, get_model
 from app.agent.prompts import (
-    CLASSIFY_INTENT_PROMPT,
+    CLASSIFY_AND_EXTRACT_PROMPT,
     CONFIRM_BLOCKED_TEMPLATE,
     CONFIRM_REPLY_TEMPLATE,
-    EXTRACT_ORDER_ITEMS_PROMPT,
     INVALID_ITEMS_NOTE_TEMPLATE,
     MENU_CONTEXT_TEMPLATE,
     REPLY_SYSTEM_PROMPT,
@@ -38,27 +37,35 @@ async def _menu_context() -> str:
     return MENU_CONTEXT_TEMPLATE.format(menu_lines="\n".join(lines))
 
 
-def classify_intent(state: AgentState) -> dict:
-    raw = _chat(CLASSIFY_INTENT_PROMPT, state["conversation"], temperature=0).strip().upper()
-    intent = raw if raw in _VALID_INTENTS else "ORDER"
-    return {"intent": intent}
-
-
-def extract_order_items(state: AgentState) -> dict:
+def classify_and_extract(state: AgentState) -> dict:
+    # Merged from two separate LLM calls (classify_intent + extract_order_items) into one - each
+    # round trip to the local model costs ~4-7s here (qwen2.5:7b only partially fits this GPU's
+    # VRAM, see CLAUDE_1.md latency notes), so cutting a whole call matters more than keeping the
+    # two concerns in separate functions.
+    #
     # temperature=0: structured-extraction task, not a creative one - left at default sampling
     # temperature, this was non-deterministic (observed ~50-80% failure rate on identical inputs).
     # json_mode=True: forces syntactically valid JSON. Without it, the model would sometimes
     # produce malformed/double-encoded output (a JSON array containing an unescaped or
     # re-stringified object instead of the object itself) that failed to parse at all, silently
     # dropping the whole order - json_object mode eliminates that failure class at the source.
-    raw = _chat(EXTRACT_ORDER_ITEMS_PROMPT, state["conversation"], temperature=0, json_mode=True)
+    raw = _chat(CLASSIFY_AND_EXTRACT_PROMPT, state["conversation"], temperature=0, json_mode=True)
 
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
-        return {"order_items": state.get("order_items", [])}
+        parsed = {}
 
-    entries = parsed.get("items", []) if isinstance(parsed, dict) else []
+    if not isinstance(parsed, dict):
+        parsed = {}
+
+    intent = str(parsed.get("intent", "")).strip().upper()
+    if intent not in _VALID_INTENTS:
+        intent = "ORDER"
+
+    entries = parsed.get("items", [])
+    if not isinstance(entries, list):
+        entries = []
 
     items: list[OrderItem] = []
     for entry in entries:
@@ -83,7 +90,7 @@ def extract_order_items(state: AgentState) -> dict:
             }
         )
 
-    return {"order_items": items}
+    return {"intent": intent, "order_items": items}
 
 
 async def validate_order_items(state: AgentState) -> dict:

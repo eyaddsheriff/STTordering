@@ -1,13 +1,18 @@
 """SQLAlchemy models for the local search-layer database.
 
-Table shapes are reverse-engineered from `04-seed.sql` (an AI-generated sample dataset), since no
-schema/migration files shipped with it. Columns here are exactly what the seed data uses — nothing
-extra invented. In particular: `menu_items` has no `has_variant`/variant concept in this sample, so
-none is modeled here. See the "Known gaps" note in CLAUDE_1.md's Phase 2 section.
+Table shapes now come from the authoritative `database/01-extensions.sql` through `04-seed.sql`
+(pulled from a coworker's `feature/database-backend` branch), replacing the earlier reverse-engineered
+version. Confirms `menu_items` genuinely has no `has_variant`/variant concept - price is a plain
+`NOT NULL` column there too, not just in our earlier guess.
+
+`menu_embeddings` (BGE-M3, 1024-dim, HNSW-indexed) exists in the schema for the planned pgvector
+semantic search, but has no population/generation logic anywhere yet (confirmed against the
+coworker's branch) - it's schema-only. Real semantic search is still open work.
 """
 
 import uuid
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Boolean,
     DateTime,
@@ -65,7 +70,10 @@ class MenuItem(Base):
     id: Mapped[uuid.UUID] = _uuid_pk()
     external_id: Mapped[str] = mapped_column(String, unique=True)
     restaurant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("restaurants.id"))
-    category_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("categories.id"))
+    # Nullable per the real schema (ON DELETE SET NULL) - a menu item can outlive its category.
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("categories.id", ondelete="SET NULL")
+    )
     name: Mapped[str] = mapped_column(String)
     description: Mapped[str | None] = mapped_column(Text)
     ingredients: Mapped[list | None] = mapped_column(JSONB)
@@ -75,6 +83,22 @@ class MenuItem(Base):
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     calories: Mapped[int | None] = mapped_column(Integer)
     synced_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+
+
+class MenuEmbedding(Base):
+    """BGE-M3 (1024-dim) embedding per menu item, for the planned pgvector semantic search.
+
+    Schema-only for now - no generation/population logic exists yet (see module docstring).
+    """
+
+    __tablename__ = "menu_embeddings"
+
+    menu_item_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("menu_items.id", ondelete="CASCADE"), primary_key=True
+    )
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(1024))
+    embedding_model: Mapped[str] = mapped_column(String, default="BAAI/bge-m3")
+    updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class Customer(Base):

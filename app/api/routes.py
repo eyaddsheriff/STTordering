@@ -1,4 +1,3 @@
-import json
 import tempfile
 from pathlib import Path
 
@@ -7,6 +6,7 @@ from fastapi.responses import Response
 
 from app.agent import order_agent
 from app.models.schemas import ChatMessage, VoiceOrderResponse
+from app.services import session_store
 from app.services.stt import speech_to_text
 from app.services.tts import text_to_speech
 
@@ -14,8 +14,9 @@ router = APIRouter(prefix="/api")
 
 
 @router.post("/voice-order", response_model=VoiceOrderResponse)
-async def voice_order(audio: UploadFile, conversation: str = Form("[]")) -> VoiceOrderResponse:
-    history = [ChatMessage(**m) for m in json.loads(conversation)]
+async def voice_order(audio: UploadFile, session_id: str | None = Form(None)) -> VoiceOrderResponse:
+    session_id = session_id or session_store.new_session_id()
+    history = [ChatMessage(**m) for m in await session_store.get_conversation(session_id)]
 
     with tempfile.NamedTemporaryFile(suffix=Path(audio.filename or "audio.wav").suffix, delete=False) as tmp:
         tmp.write(await audio.read())
@@ -27,7 +28,16 @@ async def voice_order(audio: UploadFile, conversation: str = Form("[]")) -> Voic
     result = await order_agent.ainvoke({"conversation": [m.model_dump() for m in history]})
     history.append(ChatMessage(role="assistant", content=result["reply_text"]))
 
+    await session_store.save_conversation(session_id, [m.model_dump() for m in history])
+    await session_store.save_order_state(
+        session_id,
+        result.get("order_items", []),
+        result.get("invalid_items", []),
+        result.get("order_confirmed", False),
+    )
+
     return VoiceOrderResponse(
+        session_id=session_id,
         transcript=transcript,
         reply_text=result["reply_text"],
         conversation=history,
@@ -40,5 +50,5 @@ async def voice_order(audio: UploadFile, conversation: str = Form("[]")) -> Voic
 
 @router.post("/speak")
 async def speak(text: str = Form(...)) -> Response:
-    audio_bytes = text_to_speech.synthesize(text)
+    audio_bytes = await text_to_speech.synthesize(text)
     return Response(content=audio_bytes, media_type="audio/mpeg")

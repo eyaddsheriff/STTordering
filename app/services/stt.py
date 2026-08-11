@@ -32,7 +32,9 @@ class SpeechToText:
         # no dialect-specific code to pass. Pinning it (instead of leaving None/auto-detect) avoids
         # misdetection on short utterances, which matters more the more colloquial the speech is.
         language = language or settings.stt_language or None
-        segments, _info = self._model.transcribe(audio_path, language=language)
+        # vad_filter trims silence/room-noise padding before transcribing, which real mic input
+        # always has (unlike clean synthetic test clips) - improves both accuracy and speed.
+        segments, _info = self._model.transcribe(audio_path, language=language, vad_filter=True)
         return "".join(segment.text for segment in segments).strip()
 
 

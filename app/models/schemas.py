@@ -20,6 +20,7 @@ class InvalidOrderItem(BaseModel):
 
 
 class VoiceOrderResponse(BaseModel):
+    session_id: str
     transcript: str
     reply_text: str
     conversation: list[ChatMessage]
