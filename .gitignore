@@ -1,6 +1,41 @@
-.venv/
-__pycache__/
-*.pyc
+# Environment variables
 .env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Voice / TTS
 voices/
+
+# Type checking / linting
 .mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+
+# Build / distribution
+build/
+dist/
+*.egg-info/
